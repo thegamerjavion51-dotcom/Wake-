@@ -748,6 +748,7 @@ static void load_wallpaper(void) {
 	wp_h = cairo_image_surface_get_height(surf);
 	wlr_buffer_init(&w->base, &wp_impl, wp_w, wp_h);
 	wp_buf = &w->base;
+	wlr_log(WLR_INFO, "wake: wallpaper loaded %dx%d", wp_w, wp_h);
 }
 
 static void add_wallpaper(struct tinywl_server *server,
@@ -769,6 +770,7 @@ static void add_wallpaper(struct tinywl_server *server,
 	wlr_scene_buffer_set_dest_size(sb, box.width, box.height);
 	wlr_scene_node_set_position(&sb->node, box.x, box.y);
 	wlr_scene_node_lower_to_bottom(&sb->node);
+	wlr_log(WLR_INFO, "wake: wallpaper added %dx%d", box.width, box.height);
 }
 
 static void server_new_output(struct wl_listener *listener, void *data) {
