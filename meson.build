@@ -14,7 +14,13 @@ xdg_h = custom_target('xdg-shell-protocol.h',
   input: xdg_xml, output: 'xdg-shell-protocol.h',
   command: [scanner, 'server-header', '@INPUT@', '@OUTPUT@'])
 
-executable('wake', ['wake.c', xdg_h],
+layer_xml = '/usr/share/wlr-protocols/unstable/wlr-layer-shell-unstable-v1.xml'
+layer_h = custom_target('layer-shell-protocol.h',
+  input: layer_xml,
+  output: 'wlr-layer-shell-unstable-v1-protocol.h',
+  command: [scanner, 'server-header', '@INPUT@', '@OUTPUT@'])
+
+executable('wake', ['wake.c', xdg_h, layer_h],
   dependencies: [scenefx, wlroots, cairo, cairo, wl_server, xkb],
   c_args: ['-DWLR_USE_UNSTABLE'],
   install: true)

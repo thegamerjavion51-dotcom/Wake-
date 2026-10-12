@@ -1,3 +1,4 @@
+#include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <cairo.h>
 #include <drm_fourcc.h>
@@ -410,7 +411,7 @@ static struct tinywl_toplevel *desktop_toplevel_at(
 	while (tree != NULL && tree->node.data == NULL) {
 		tree = tree->node.parent;
 	}
-	return tree->node.data;
+	return tree ? tree->node.data : NULL;
 }
 
 static void reset_cursor_mode(struct tinywl_server *server) {
@@ -773,6 +774,25 @@ static void add_wallpaper(struct tinywl_server *server,
 	wlr_log(WLR_INFO, "wake: wallpaper added %dx%d", box.width, box.height);
 }
 
+static struct wlr_output_mode *pick_mode(struct wlr_output *out) {
+	struct wlr_output_mode *pref = wlr_output_preferred_mode(out);
+	if (!pref) {
+		return NULL;
+	}
+	struct wlr_output_mode *best = pref;
+	struct wlr_output_mode *m;
+	wl_list_for_each(m, &out->modes, link) {
+		if (m->width == pref->width &&
+				m->height == pref->height &&
+				m->refresh > best->refresh) {
+			best = m;
+		}
+	}
+	wlr_log(WLR_INFO, "wake: mode %dx%d at %d mHz",
+		best->width, best->height, best->refresh);
+	return best;
+}
+
 static void server_new_output(struct wl_listener *listener, void *data) {
 	/* This event is raised by the backend when a new output (aka a display or
 	 * monitor) becomes available. */
@@ -794,7 +814,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	 * refresh rate), and each monitor supports only a specific set of modes. We
 	 * just pick the monitor's preferred mode, a more sophisticated compositor
 	 * would let the user configure it. */
-	struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
+	struct wlr_output_mode *mode = pick_mode(wlr_output);
 	if (mode != NULL) {
 		wlr_output_state_set_mode(&state, mode);
 	}
@@ -838,7 +858,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	add_wallpaper(server, wlr_output);
 }
 
-#define CORNER_RADIUS 20
+# define CORNER_RADIUS 5
 
 static void round_corners_iter(struct wlr_scene_buffer *buffer,
 		int sx, int sy, void *data) {
@@ -987,6 +1007,8 @@ static void xdg_toplevel_request_fullscreen(
 	}
 }
 
+static struct wlr_scene_tree *toplevel_tree;
+
 static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	/* This event is raised when a client creates a new toplevel (application window). */
 	struct tinywl_server *server = wl_container_of(listener, server, new_xdg_toplevel);
@@ -997,7 +1019,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	toplevel->server = server;
 	toplevel->xdg_toplevel = xdg_toplevel;
 	toplevel->scene_tree =
-		wlr_scene_xdg_surface_create(&toplevel->server->scene->tree, xdg_toplevel->base);
+		wlr_scene_xdg_surface_create(toplevel_tree, xdg_toplevel->base);
 	toplevel->scene_tree->node.data = toplevel;
 	xdg_toplevel->base->data = toplevel->scene_tree;
 
@@ -1069,6 +1091,123 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 
 	popup->destroy.notify = xdg_popup_destroy;
 	wl_signal_add(&xdg_popup->events.destroy, &popup->destroy);
+}
+
+static struct tinywl_server *g_server;
+static struct wlr_scene_tree *layer_trees[4];
+static struct wlr_scene_tree *toplevel_tree;
+static struct wl_list layer_surfaces;
+static struct wl_listener new_layer_listener;
+
+struct wake_layer {
+	struct wl_list link;
+	struct wlr_layer_surface_v1 *surface;
+	struct wlr_scene_layer_surface_v1 *scene;
+	struct wl_listener commit;
+	struct wl_listener map;
+	struct wl_listener unmap;
+	struct wl_listener destroy;
+};
+
+static void arrange_layers(struct wlr_output *output) {
+	struct wlr_box full, usable;
+	wlr_output_layout_get_box(g_server->output_layout, output, &full);
+	usable = full;
+	for (int pass = 1; pass >= 0; pass--) {
+		struct wake_layer *w;
+		wl_list_for_each(w, &layer_surfaces, link) {
+			if (w->surface->output != output) {
+				continue;
+			}
+			bool excl = w->surface->current.exclusive_zone > 0;
+			if (excl != (pass == 1)) {
+				continue;
+			}
+			wlr_scene_layer_surface_v1_configure(w->scene, &full, &usable);
+		}
+	}
+}
+
+static void layer_commit(struct wl_listener *l, void *data) {
+	struct wake_layer *w = wl_container_of(l, w, commit);
+	struct wlr_layer_surface_v1 *ls = w->surface;
+	if (!ls->output) {
+		return;
+	}
+	if (ls->initial_commit) {
+		struct wlr_layer_surface_v1_state old = ls->current;
+		ls->current = ls->pending;
+		arrange_layers(ls->output);
+		ls->current = old;
+		return;
+	}
+	arrange_layers(ls->output);
+}
+
+static void layer_map(struct wl_listener *l, void *data) {
+	struct wake_layer *w = wl_container_of(l, w, map);
+	struct wlr_layer_surface_v1 *ls = w->surface;
+	struct wlr_seat *seat = g_server->seat;
+	struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
+	if (!kb || ls->current.keyboard_interactive !=
+			ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE) {
+		return;
+	}
+	wlr_seat_keyboard_notify_enter(seat, ls->surface,
+		kb->keycodes, kb->num_keycodes, &kb->modifiers);
+}
+
+static void layer_unmap(struct wl_listener *l, void *data) {
+	struct wake_layer *w = wl_container_of(l, w, unmap);
+	struct tinywl_server *s = g_server;
+	if (s->seat->keyboard_state.focused_surface != w->surface->surface ||
+			wl_list_empty(&s->toplevels)) {
+		return;
+	}
+	struct tinywl_toplevel *top =
+		wl_container_of(s->toplevels.next, top, link);
+	focus_toplevel(top);
+}
+
+static void layer_destroy(struct wl_listener *l, void *data) {
+	struct wake_layer *w = wl_container_of(l, w, destroy);
+	struct wlr_output *out = w->surface->output;
+	wl_list_remove(&w->commit.link);
+	wl_list_remove(&w->map.link);
+	wl_list_remove(&w->unmap.link);
+	wl_list_remove(&w->destroy.link);
+	wl_list_remove(&w->link);
+	free(w);
+	if (out) {
+		arrange_layers(out);
+	}
+}
+
+static void new_layer_surface(struct wl_listener *l, void *data) {
+	struct wlr_layer_surface_v1 *ls = data;
+	if (!ls->output) {
+		if (wl_list_empty(&g_server->outputs)) {
+			wlr_layer_surface_v1_destroy(ls);
+			return;
+		}
+		struct tinywl_output *o =
+			wl_container_of(g_server->outputs.next, o, link);
+		ls->output = o->wlr_output;
+	}
+	struct wake_layer *w = calloc(1, sizeof(*w));
+	w->surface = ls;
+	w->scene = wlr_scene_layer_surface_v1_create(
+		layer_trees[ls->pending.layer], ls);
+	w->commit.notify = layer_commit;
+	wl_signal_add(&ls->surface->events.commit, &w->commit);
+	w->map.notify = layer_map;
+	wl_signal_add(&ls->surface->events.map, &w->map);
+	w->unmap.notify = layer_unmap;
+	wl_signal_add(&ls->surface->events.unmap, &w->unmap);
+	w->destroy.notify = layer_destroy;
+	wl_signal_add(&ls->events.destroy, &w->destroy);
+	wl_list_insert(&layer_surfaces, &w->link);
+	wlr_surface_send_enter(ls->surface, ls->output);
 }
 
 int main(int argc, char *argv[]) {
@@ -1159,6 +1298,16 @@ int main(int argc, char *argv[]) {
 	 */
 	server.scene = wlr_scene_create();
 	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
+	g_server = &server;
+	wl_list_init(&layer_surfaces);
+	layer_trees[0] = wlr_scene_tree_create(&server.scene->tree);
+	layer_trees[1] = wlr_scene_tree_create(&server.scene->tree);
+	toplevel_tree = wlr_scene_tree_create(&server.scene->tree);
+	layer_trees[2] = wlr_scene_tree_create(&server.scene->tree);
+	layer_trees[3] = wlr_scene_tree_create(&server.scene->tree);
+	struct wlr_layer_shell_v1 *lsh = wlr_layer_shell_v1_create(server.wl_display, 4);
+	new_layer_listener.notify = new_layer_surface;
+	wl_signal_add(&lsh->events.new_surface, &new_layer_listener);
 
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
 	 * used for application windows. For more detail on shells, refer to
