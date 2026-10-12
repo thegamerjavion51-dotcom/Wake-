@@ -185,6 +185,7 @@ static void keyboard_handle_modifiers(
 static void spawn(const char *cmd) {
 	if (fork() == 0) {
 		setsid();
+		signal(SIGCHLD, SIG_DFL);
 		execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
 		_exit(1);
 	}
@@ -1210,6 +1211,22 @@ static void new_layer_surface(struct wl_listener *l, void *data) {
 	wlr_surface_send_enter(ls->surface, ls->output);
 }
 
+static void run_autostart(void) {
+	const char *home = getenv("HOME");
+	char path[512];
+	snprintf(path, sizeof(path),
+		"%s/.config/wake/autostart.sh", home ? home : "");
+	if (access(path, R_OK) != 0) {
+		return;
+	}
+	if (fork() == 0) {
+		setsid();
+		signal(SIGCHLD, SIG_DFL);
+		execl("/bin/sh", "sh", path, (char *)NULL);
+		_exit(1);
+	}
+}
+
 int main(int argc, char *argv[]) {
 	wlr_log_init(WLR_DEBUG, NULL);
 	signal(SIGCHLD, SIG_IGN);
@@ -1394,6 +1411,8 @@ int main(int argc, char *argv[]) {
 	/* Set the WAYLAND_DISPLAY environment variable to our socket and run the
 	 * startup command if requested. */
 	setenv("WAYLAND_DISPLAY", socket, true);
+	setenv("XDG_CURRENT_DESKTOP", "wake", 1);
+	setenv("XDG_SESSION_TYPE", "wayland", 1);
 	if (startup_cmd) {
 		if (fork() == 0) {
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, (void *)NULL);
@@ -1405,6 +1424,7 @@ int main(int argc, char *argv[]) {
 	 * frame events at the refresh rate, and so on. */
 	wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s",
 			socket);
+	run_autostart();
 	wl_display_run(server.wl_display);
 
 
