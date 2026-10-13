@@ -1005,6 +1005,10 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	if (cgeo.width > 0 && cgeo.height > 0) {
 		wlr_scene_rect_set_size(ct->border,
 			cgeo.width + 2 * BORDER_W, cgeo.height + 2 * BORDER_W);
+		struct clipped_region cr = clipped_region_get_default();
+		cr.area = (struct wlr_box){BORDER_W, BORDER_W, cgeo.width, cgeo.height};
+		cr.corners = corner_radii_all(CORNER_RADIUS);
+		wlr_scene_rect_set_clipped_region(ct->border, cr);
 	}
 	/* Called when a new surface state is committed. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
