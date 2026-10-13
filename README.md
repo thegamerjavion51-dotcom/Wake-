@@ -21,7 +21,7 @@ after that, install the following packages
 sudo pacman -S --needed base-devel git meson ninja (I'm using arch so it might be different depending on your distro)
 
 Then, configure the build using 
-meson setup build
+ meson setup build
 
 After, you can compile wake and install it
 ninja -C build
