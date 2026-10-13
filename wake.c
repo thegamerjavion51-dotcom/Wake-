@@ -99,6 +99,13 @@ struct tinywl_toplevel {
 	struct tinywl_server *server;
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	struct wlr_scene_tree *scene_tree;
+	struct wlr_scene_rect *border;
+	bool fullscreen;
+	struct wlr_box saved;
+    struct wlr_scene_rect *border_top;
+    struct wlr_scene_rect *border_bottom;
+    struct wlr_scene_rect *border_left;
+    struct wlr_scene_rect *border_right;
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener commit;
@@ -124,6 +131,21 @@ struct tinywl_keyboard {
 	struct wl_listener key;
 	struct wl_listener destroy;
 };
+
+#define BORDER_W 3
+static const float BORDER_ON[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+static const float BORDER_OFF[4] = {0.45f, 0.45f, 0.45f, 1.0f};
+
+static void update_borders(struct tinywl_server *server,
+		struct tinywl_toplevel *focused) {
+	struct tinywl_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->border) {
+			wlr_scene_rect_set_color(t->border,
+				t == focused ? BORDER_ON : BORDER_OFF);
+		}
+	}
+}
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 	/* Note: this function only deals with keyboard focus. */
@@ -157,6 +179,7 @@ static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 	wl_list_insert(&server->toplevels, &toplevel->link);
 	/* Activate the new surface */
 	wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
+	update_borders(server, toplevel);
 	/*
 	 * Tell the seat to have the keyboard enter this surface. wlroots will keep
 	 * track of this and automatically send key events to the appropriate
@@ -195,6 +218,8 @@ static void spawn(const char *cmd) {
 	}
 }
 
+static void toplevel_set_fullscreen(struct tinywl_toplevel *t, bool fs);
+
 static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 	/*
 	 * Here we handle compositor keybindings. This is when the compositor is
@@ -207,6 +232,17 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 	case XKB_KEY_Return:
 		spawn("foot");
 		break;
+	case XKB_KEY_f: {
+		struct wlr_surface *fs = server->seat->keyboard_state.focused_surface;
+		struct wlr_xdg_toplevel *fx = fs ?
+			wlr_xdg_toplevel_try_from_wlr_surface(fs) : NULL;
+		if (fx && fx->base->data) {
+			struct wlr_scene_tree *st = fx->base->data;
+			struct tinywl_toplevel *ft = st->node.data;
+			toplevel_set_fullscreen(ft, !ft->fullscreen);
+		}
+		return true;
+	}
 	case XKB_KEY_q: {
 		if (wl_list_empty(&server->toplevels)) break;
 		struct tinywl_toplevel *top =
@@ -866,7 +902,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	add_wallpaper(server, wlr_output);
 }
 
-# define CORNER_RADIUS 5
+# define CORNER_RADIUS 0
 
 static void round_corners_iter(struct wlr_scene_buffer *buffer,
 		int sx, int sy, void *data) {
@@ -883,9 +919,57 @@ static void round_corners_iter(struct wlr_scene_buffer *buffer,
 	}
 }
 
+static struct wlr_scene_tree *layer_trees[4];
+
+static void toplevel_set_fullscreen(struct tinywl_toplevel *t, bool fs) {
+	struct tinywl_server *server = t->server;
+	struct wlr_xdg_toplevel *xt = t->xdg_toplevel;
+	if (!xt->base->initialized || t->fullscreen == fs) {
+		return;
+	}
+	if (fs) {
+		struct wlr_box g = xt->base->geometry;
+		t->saved.x = t->scene_tree->node.x;
+		t->saved.y = t->scene_tree->node.y;
+		t->saved.width = g.width;
+		t->saved.height = g.height;
+		struct wlr_output *o = wlr_output_layout_output_at(
+			server->output_layout,
+			t->scene_tree->node.x + g.width / 2,
+			t->scene_tree->node.y + g.height / 2);
+		if (!o) {
+			o = wlr_output_layout_get_center_output(server->output_layout);
+		}
+		if (!o) {
+			return;
+		}
+		struct wlr_box ob;
+		wlr_output_layout_get_box(server->output_layout, o, &ob);
+		wlr_xdg_toplevel_set_fullscreen(xt, true);
+		wlr_xdg_toplevel_set_size(xt, ob.width, ob.height);
+		wlr_scene_node_set_position(&t->scene_tree->node, ob.x, ob.y);
+		wlr_scene_node_raise_to_top(&t->scene_tree->node);
+		wlr_scene_node_set_enabled(&t->border->node, false);
+		if (layer_trees[2]) {
+			wlr_scene_node_set_enabled(&layer_trees[2]->node, false);
+		}
+	} else {
+		wlr_xdg_toplevel_set_fullscreen(xt, false);
+		wlr_xdg_toplevel_set_size(xt, t->saved.width, t->saved.height);
+		wlr_scene_node_set_position(&t->scene_tree->node,
+			t->saved.x, t->saved.y);
+		wlr_scene_node_set_enabled(&t->border->node, true);
+		if (layer_trees[2]) {
+			wlr_scene_node_set_enabled(&layer_trees[2]->node, true);
+		}
+	}
+	t->fullscreen = fs;
+}
+
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
+	wlr_scene_node_set_enabled(&toplevel->border->node, true);
 	wlr_scene_node_for_each_buffer(&toplevel->scene_tree->node,
 		round_corners_iter, NULL);
 
@@ -895,6 +979,14 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 }
 
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *ut = wl_container_of(listener, ut, unmap);
+	wlr_scene_node_set_enabled(&ut->border->node, false);
+	if (ut->fullscreen) {
+		ut->fullscreen = false;
+		if (layer_trees[2]) {
+			wlr_scene_node_set_enabled(&layer_trees[2]->node, true);
+		}
+	}
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
 
@@ -907,6 +999,13 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
+	struct tinywl_toplevel *ct = wl_container_of(listener, ct, commit);
+	struct wlr_box cgeo;
+	cgeo = ct->xdg_toplevel->base->geometry;
+	if (cgeo.width > 0 && cgeo.height > 0) {
+		wlr_scene_rect_set_size(ct->border,
+			cgeo.width + 2 * BORDER_W, cgeo.height + 2 * BORDER_W);
+	}
 	/* Called when a new surface state is committed. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
 
@@ -1010,6 +1109,8 @@ static void xdg_toplevel_request_fullscreen(
 	/* Just as with request_maximize, we must send a configure here. */
 	struct tinywl_toplevel *toplevel =
 		wl_container_of(listener, toplevel, request_fullscreen);
+	toplevel_set_fullscreen(toplevel, toplevel->xdg_toplevel->requested.fullscreen);
+	return;
 	if (toplevel->xdg_toplevel->base->initialized) {
 		wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
 	}
@@ -1029,6 +1130,13 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	toplevel->scene_tree =
 		wlr_scene_xdg_surface_create(toplevel_tree, xdg_toplevel->base);
 	toplevel->scene_tree->node.data = toplevel;
+	toplevel->border = wlr_scene_rect_create(toplevel->scene_tree, 0, 0, BORDER_OFF);
+	wlr_scene_node_set_position(&toplevel->border->node, -BORDER_W, -BORDER_W);
+	wlr_scene_node_lower_to_bottom(&toplevel->border->node);
+	wlr_scene_node_set_enabled(&toplevel->border->node, false);
+	if (CORNER_RADIUS > 0) {
+		wlr_scene_rect_set_corner_radius(toplevel->border, CORNER_RADIUS + BORDER_W);
+	}
 	xdg_toplevel->base->data = toplevel->scene_tree;
 
 	/* Listen to the various events it can emit */
