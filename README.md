@@ -39,4 +39,5 @@ open terminal: ALT + RETURN
 kill: ALT + Q
 dragging windows: ALT + MOUSE LEFT
 resizing windows: ALT + MOUSE RIGHT
+full screen: ALT + F
 
