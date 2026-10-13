@@ -1,3 +1,7 @@
+#include <wlr/types/wlr_xdg_output_v1.h>
+#include <wlr/types/wlr_buffer.h>
+#include <wlr/types/wlr_linux_dmabuf_v1.h>
+#include <wlr/types/wlr_linux_drm_syncobj_v1.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include <cairo.h>
@@ -210,6 +214,9 @@ static bool handle_keybinding(struct tinywl_server *server, xkb_keysym_t sym) {
 		wlr_xdg_toplevel_send_close(top->xdg_toplevel);
 		break;
 	}
+	case XKB_KEY_d:
+		spawn("fuzzel");
+		break;
 	case XKB_KEY_Escape:
 		wl_display_terminate(server->wl_display);
 		break;
@@ -421,8 +428,8 @@ static void reset_cursor_mode(struct tinywl_server *server) {
 	server->grabbed_toplevel = NULL;
 }
 
-#define SNAP_DIST 24
-#define SNAP_GAP 10
+#define SNAP_DIST 10
+#define SNAP_GAP 5
 
 static void try_snap(int delta, int *best, int *out) {
 	if (abs(delta) < *best) {
@@ -1108,6 +1115,7 @@ struct wake_layer {
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener destroy;
+	bool mapped;
 };
 
 static void arrange_layers(struct wlr_output *output) {
@@ -1142,6 +1150,11 @@ static void layer_commit(struct wl_listener *l, void *data) {
 		ls->current = old;
 		return;
 	}
+	if (ls->current.committed == 0 &&
+			w->mapped == ls->surface->mapped) {
+		return;
+	}
+	w->mapped = ls->surface->mapped;
 	arrange_layers(ls->output);
 }
 
@@ -1300,6 +1313,7 @@ int main(int argc, char *argv[]) {
 	/* Creates an output layout, which a wlroots utility for working with an
 	 * arrangement of screens in a physical layout. */
 	server.output_layout = wlr_output_layout_create(server.wl_display);
+	wlr_xdg_output_manager_v1_create(server.wl_display, server.output_layout);
 
 	/* Configure a listener to be notified when new outputs are available on the
 	 * backend. */
@@ -1315,6 +1329,16 @@ int main(int argc, char *argv[]) {
 	 */
 	server.scene = wlr_scene_create();
 	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
+
+
+	int sync_fd = wlr_renderer_get_drm_fd(server.renderer);
+	if (sync_fd >= 0 && server.renderer->features.timeline &&
+			server.backend->features.timeline) {
+		wlr_linux_drm_syncobj_manager_v1_create(
+			server.wl_display, 1, sync_fd);
+		wlr_log(WLR_INFO, "wake: explicit sync enabled");
+	}
+
 	g_server = &server;
 	wl_list_init(&layer_surfaces);
 	layer_trees[0] = wlr_scene_tree_create(&server.scene->tree);
@@ -1431,6 +1455,7 @@ int main(int argc, char *argv[]) {
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
 	wl_display_destroy_clients(server.wl_display);
+	wl_list_remove(&new_layer_listener.link);
 
 	wl_list_remove(&server.new_xdg_toplevel.link);
 	wl_list_remove(&server.new_xdg_popup.link);
